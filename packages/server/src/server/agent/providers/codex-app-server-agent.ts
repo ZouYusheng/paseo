@@ -3521,19 +3521,16 @@ export class CodexAppServerAgentSession implements AgentSession {
   } | null = null;
   private cachedSkills: Array<{ name: string; description: string; path: string }> | null = null;
 
+  private readonly usageSessionKey = randomUUID();
+  private readonly harnessEnvironment: Record<string, string>;
+
   usageSession() {
-    if (
-      this.closed ||
-      this.connectionState !== "connected" ||
-      !this.client ||
-      !this.deps.environment
-    )
-      return null;
+    if (this.closed) return null;
     return {
       provider: "codex",
       model: this.config.model,
-      env: this.deps.environment,
-      sessionKey: this.client,
+      env: this.harnessEnvironment,
+      sessionKey: this.usageSessionKey,
     };
   }
 
@@ -3562,6 +3559,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     this.providerOptions =
       validateProviderOptions("codex", CodexProviderOptionsSchema, config.providerOptions) ?? {};
     this.config = config;
+    this.harnessEnvironment = deps.environment ?? buildCodexAppServerEnv();
     this.asyncQuestions = new CodexAsyncQuestions(resumeHandle?.metadata?.asyncQuestions);
     this.codexHome = deps.codexHome ?? resolveCodexHomeDir(process.env);
     this.config.thinkingOptionId = normalizeCodexThinkingOptionId(this.config.thinkingOptionId);

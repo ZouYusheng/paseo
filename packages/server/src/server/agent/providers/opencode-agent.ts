@@ -13,7 +13,7 @@ import {
   type TextPartInput as OpenCodeTextPartInput,
 } from "@opencode-ai/sdk/v2/client";
 import fs from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { createPathEquivalenceMatcher } from "../../../utils/path.js";
 import pLimit from "p-limit";
@@ -1492,6 +1492,7 @@ export class OpenCodeAgentClient implements AgentClient {
         client,
         session.id,
         this.logger,
+        connection.environment,
         new Map(this.modelContextWindows),
         connection.events,
         connection.release,
@@ -1501,7 +1502,6 @@ export class OpenCodeAgentClient implements AgentClient {
         false,
         unbindBridge,
         connectServer,
-        connection.environment,
       );
     } catch (error) {
       await connection.release();
@@ -1547,6 +1547,7 @@ export class OpenCodeAgentClient implements AgentClient {
         client,
         handle.sessionId,
         this.logger,
+        connection.environment,
         new Map(this.modelContextWindows),
         connection.events,
         connection.release,
@@ -1556,7 +1557,6 @@ export class OpenCodeAgentClient implements AgentClient {
         registeredAcquisition !== null,
         unbindBridge,
         connectServer,
-        connection.environment,
       );
     } catch (error) {
       await connection.release();
@@ -3360,7 +3360,7 @@ async function listOpenCodeChildSessions(
 
 /** One OpenCode server generation a session talks to. */
 interface OpenCodeServerConnection {
-  environment?: Record<string, string>;
+  environment: Record<string, string>;
   client: OpencodeClient;
   events: OpenCodeEventSource;
   url: string;
@@ -3441,11 +3441,13 @@ class OpenCodeAgentSession implements AgentSession {
   private closed = false;
   private readonly persistSession: boolean;
   private deletedFromProvider = false;
+  private readonly usageSessionKey = randomUUID();
   constructor(
     config: OpenCodeAgentConfig,
     client: OpencodeClient,
     sessionId: string,
     logger: Logger,
+    private readonly harnessEnvironment: Record<string, string>,
     modelContextWindowsByModelKey: ReadonlyMap<string, number> = new Map(),
     events: OpenCodeEventSource = EMPTY_OPENCODE_EVENT_SOURCE,
     releaseServer: () => Promise<void> = async () => undefined,
@@ -3455,10 +3457,15 @@ class OpenCodeAgentSession implements AgentSession {
     private readonly externallyDriven = false,
     releaseBridge?: () => void,
     connectServer?: () => Promise<OpenCodeServerConnection>,
-    environment?: Record<string, string>,
   ) {
     this.config = config;
-    this.server = { client, events, url: serverUrl ?? "", release: releaseServer, environment };
+    this.server = {
+      client,
+      events,
+      url: serverUrl ?? "",
+      release: releaseServer,
+      environment: this.harnessEnvironment,
+    };
     this.connectServer = connectServer ?? null;
     this.sessionId = sessionId;
     this.logger = logger.child({ agentId: this.agentId });
@@ -3474,12 +3481,12 @@ class OpenCodeAgentSession implements AgentSession {
   }
 
   usageSession() {
-    if (this.closed || this.serverExited || !this.server.environment) return null;
+    if (this.closed) return null;
     return {
       provider: "opencode",
       model: this.config.model,
-      env: this.server.environment,
-      sessionKey: this.server.events,
+      env: this.harnessEnvironment,
+      sessionKey: this.usageSessionKey,
     };
   }
 

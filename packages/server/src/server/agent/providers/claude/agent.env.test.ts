@@ -152,7 +152,13 @@ describe("Claude SDK env", () => {
     );
 
     try {
+      const descriptor = session.usageSession?.();
+      expect(descriptor?.env.PASEO_TEST_FLAG).toBe("resume-launch-value");
+      expect(descriptor?.sessionKey).toEqual(expect.any(String));
+      expect(queryFactory).not.toHaveBeenCalled();
       const result = await session.run("resume env check");
+      expect(session.usageSession?.()?.sessionKey).toBe(descriptor?.sessionKey);
+      expect(capturedEnv).toBe(descriptor?.env);
       expect(result.sessionId).toBe("persisted-session");
       expect(capturedEnv?.PASEO_AGENT_ID).toBe(launchContext.env?.PASEO_AGENT_ID);
       expect(capturedEnv?.PASEO_TEST_FLAG).toBe(launchContext.env?.PASEO_TEST_FLAG);

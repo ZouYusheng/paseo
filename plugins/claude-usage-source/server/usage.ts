@@ -405,7 +405,8 @@ function claudeKeychainRoute(lookup: ClaudeCredentialLookup) {
   const configDir = env.CLAUDE_CONFIG_DIR;
   // macOS still uses Keychain with CLAUDE_CONFIG_DIR, with an entry keyed to that directory:
   // https://code.claude.com/docs/en/authentication#credential-management
-  // Claude Code 2.1.59's service derivation hashes the NFC-normalized config directory.
+  // Verified in @anthropic-ai/claude-code 2.1.59, package/cli.js: _c() appends the first
+  // 8 SHA-256 hex characters of HA() (the NFC-normalized config directory).
   const suffix = configDir ? `-${hashAccountKey(configDir.normalize("NFC")).slice(0, 8)}` : "";
   return {
     store: "keychain" as const,

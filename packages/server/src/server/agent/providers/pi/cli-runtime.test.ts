@@ -292,7 +292,10 @@ describe("PiCliRuntime", () => {
 
     const state = session.getState();
     child.stderr.write("boom");
+    const environment = session.environment;
     child.emit("exit", 1, null);
+    expect(session.environment).toBe(environment);
+    expect(environment).toBeDefined();
 
     await expect(state).rejects.toThrow("boom");
   });

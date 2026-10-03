@@ -98,8 +98,8 @@ class PiCliRuntimeSession implements PiRuntimeSession {
     });
   }
 
-  get environment(): Record<string, string> | undefined {
-    return this.process.isRunning ? this.launchEnvironment : undefined;
+  get environment(): Record<string, string> {
+    return this.launchEnvironment;
   }
 
   onEvent(callback: (event: PiRuntimeEvent) => void): () => void {

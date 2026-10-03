@@ -491,7 +491,10 @@ describe("OMP CLI runtime", () => {
     const child = createOmpChild();
     const session = await createRuntime(child).startSession({ cwd: "/workspace/project" });
 
+    const environment = session.environment;
     child.emit("exit", 1, null);
+    expect(session.environment).toBe(environment);
+    expect(environment).toBeDefined();
 
     await expect(session.abort()).resolves.toBeUndefined();
   });

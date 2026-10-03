@@ -30,7 +30,7 @@ const OPENCODE_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 5_000;
 const OPENCODE_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS = 1_000;
 
 export interface OpenCodeServerAcquisition {
-  environment?: Record<string, string>;
+  environment: Record<string, string>;
   server: { port: number; url: string };
   events: OpenCodeEventSource;
   release: () => Promise<void>;

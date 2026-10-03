@@ -11423,7 +11423,7 @@ test("usage session is a pure read of the live adapter and disappears on close",
     provider: "claude",
     model: "opus",
     env: { HOME: "/fixture", CLAUDE_CONFIG_DIR: "/fixture/work" },
-    sessionKey: {},
+    sessionKey: "launch-1",
   };
   const client = new (class extends TestAgentClient {
     override async createSession(config: AgentSessionConfig): Promise<AgentSession> {

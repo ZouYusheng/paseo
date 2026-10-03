@@ -39,8 +39,7 @@ export interface ListUsageReportsOptions {
 interface AgentReports {
   provider: string;
   model?: string;
-  // Remembering an account must not keep a closed harness alive.
-  sessionKey: WeakRef<object>;
+  sessionKey: string;
   reports: Map<string, KnownReport>;
 }
 
@@ -119,7 +118,7 @@ export class UsageSourceRegistry {
     if (!session) return [];
     const previous = this.byAgent.get(agentId);
     const sameScope =
-      previous?.sessionKey.deref() === session.sessionKey &&
+      previous?.sessionKey === session.sessionKey &&
       previous.provider === session.provider &&
       previous.model === session.model;
     if (sameScope) return [...previous.reports.keys()];
@@ -132,7 +131,7 @@ export class UsageSourceRegistry {
     // A query that finishes after a resume must not publish the previous launch's mapping.
     if (this.agents.usageSession(agentId)?.sessionKey !== session.sessionKey) return [];
     this.byAgent.set(agentId, {
-      sessionKey: new WeakRef(session.sessionKey),
+      sessionKey: session.sessionKey,
       provider: session.provider,
       model: session.model,
       reports,

@@ -651,7 +651,7 @@ export interface AgentUsageSession {
   provider: string;
   model?: string;
   env: Record<string, string>;
-  sessionKey: object;
+  sessionKey: string;
 }
 
 export interface AgentSession {

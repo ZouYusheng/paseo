@@ -286,8 +286,8 @@ test("failed fallbacks preserve the final problem", async () => {
 
 test("session discovery reuses accounts, separates launches, and retains live agent reports globally", async () => {
   const sessions = new Map([
-    ["one", { provider: "claude", env: { HOME: "/one" }, sessionKey: {} }],
-    ["two", { provider: "claude", env: { HOME: "/two" }, sessionKey: {} }],
+    ["one", { provider: "claude", env: { HOME: "/one" }, sessionKey: "launch-1" }],
+    ["two", { provider: "claude", env: { HOME: "/two" }, sessionKey: "launch-2" }],
   ]);
   const existing = new Set(["one", "two", "closed"]);
   const discoveries: string[] = [];
@@ -321,7 +321,7 @@ test("session discovery reuses accounts, separates launches, and retains live ag
     "claude:default",
     "claude:same",
   ]);
-  sessions.set("one", { provider: "claude", env: { HOME: "/new" }, sessionKey: {} });
+  sessions.set("one", { provider: "claude", env: { HOME: "/new" }, sessionKey: "launch-3" });
   expect((await registry.listReports({ agentId: "one" })).map((r) => r.id)).toEqual(["claude:new"]);
   existing.delete("two");
   sessions.delete("two");

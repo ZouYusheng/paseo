@@ -1798,6 +1798,28 @@ describe("Codex app-server provider", () => {
     await session.close();
   });
 
+  test("resumed session exposes usage before connecting and not after close", async () => {
+    let spawns = 0;
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      { sessionId: "saved-thread" },
+      createTestLogger(),
+      async () => {
+        spawns++;
+        throw new Error("unexpected spawn");
+      },
+      { environment: { HOME: "/fixture/codex", CODEX_HOME: "/fixture/profile" } },
+    );
+    expect(session.usageSession()).toMatchObject({
+      provider: "codex",
+      env: { CODEX_HOME: "/fixture/profile" },
+      sessionKey: expect.any(String),
+    });
+    expect(spawns).toBe(0);
+    await session.close();
+    expect(session.usageSession()).toBeNull();
+  });
+
   test("loads archived Codex history without resuming the native thread", async () => {
     const threadRequests: string[] = [];
     const appServer = createFakeCodexAppServer({
