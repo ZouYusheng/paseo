@@ -54,6 +54,37 @@ describe("OMP history mapper", () => {
     });
   });
 
+  test("replays a Paseo browser tool result whose details error is an object", async () => {
+    const events = await collectHistory([
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "shot-1", name: "browser_screenshot", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "shot-1",
+        toolName: "browser_screenshot",
+        content: [{ type: "text", text: "The tab has not painted yet. Retry the screenshot." }],
+        details: {
+          ok: false,
+          error: {
+            code: "screenshot_no_frame",
+            message: "The tab has not painted yet. Retry the screenshot.",
+            retryable: true,
+          },
+        },
+        isError: false,
+      },
+      { role: "assistant", content: [{ type: "text", text: "Retrying later." }] },
+    ]);
+
+    expect(events.map((event) => event.item)).toEqual([
+      expect.objectContaining({ type: "tool_call", callId: "shot-1", status: "running" }),
+      expect.objectContaining({ type: "tool_call", callId: "shot-1", name: "browser_screenshot" }),
+      expect.objectContaining({ type: "assistant_message", text: "Retrying later." }),
+    ]);
+  });
+
   test("restores blocked and abandoned todo state from a session file", async () => {
     const dir = mkdtempSync(join(tmpdir(), "omp-todo-state-history-"));
     const sessionFile = join(dir, "session.jsonl");

@@ -158,6 +158,9 @@ const OmpToolResultContentSchema = z.union([
 const OmpToolResultDetailsSchema = z
   .object({
     diff: z.string().optional(),
+    // Paseo host tools (browser_*) put a structured error object here; their
+    // message is already in the text content.
+    error: z.string().optional().catch(undefined),
   })
   .passthrough();
 
