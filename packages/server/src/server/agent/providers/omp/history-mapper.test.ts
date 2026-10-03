@@ -80,9 +80,51 @@ describe("OMP history mapper", () => {
 
     expect(events.map((event) => event.item)).toEqual([
       expect.objectContaining({ type: "tool_call", callId: "shot-1", status: "running" }),
-      expect.objectContaining({ type: "tool_call", callId: "shot-1", name: "browser_screenshot" }),
+      expect.objectContaining({
+        type: "tool_call",
+        callId: "shot-1",
+        name: "browser_screenshot",
+        detail: expect.objectContaining({
+          type: "unknown",
+          output: expect.objectContaining({
+            details: expect.objectContaining({
+              error: expect.objectContaining({ code: "screenshot_no_frame", retryable: true }),
+            }),
+          }),
+        }),
+      }),
       expect.objectContaining({ type: "assistant_message", text: "Retrying later." }),
     ]);
+  });
+
+  test("reports a failed tool's structured details error by its message", async () => {
+    const events = await collectHistory([
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "tabs-1", name: "browser_list_tabs", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "tabs-1",
+        toolName: "browser_list_tabs",
+        content: [],
+        details: {
+          ok: false,
+          error: {
+            code: "browser_no_host",
+            message: "No browser automation host is connected.",
+            retryable: true,
+          },
+        },
+        isError: true,
+      },
+    ]);
+
+    expect(events.at(-1)?.item).toMatchObject({
+      type: "tool_call",
+      status: "failed",
+      error: "No browser automation host is connected.",
+    });
   });
 
   test("restores blocked and abandoned todo state from a session file", async () => {
