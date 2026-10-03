@@ -139,15 +139,15 @@ export async function installUsageReportsFixture(
           ws.send(
             JSON.stringify({
               type: "session",
-              message: {
-                type: "rpc_error",
-                payload: {
-                  requestId,
-                  requestType,
-                  error: response.error,
-                  code: "transport",
-                },
-              },
+              message: providerUsageListOnly
+                ? {
+                    type: "rpc_error",
+                    payload: { requestId, requestType, error: response.error, code: "transport" },
+                  }
+                : {
+                    type: "usage.list_reports.response",
+                    payload: { requestId, error: response.error },
+                  },
             }),
           );
           listCounter.increment();
@@ -155,6 +155,16 @@ export async function installUsageReportsFixture(
         }
         const ids = Array.isArray(request.reportIds) ? request.reportIds : null;
         const reports = ids ? response.filter((entry) => ids.includes(entry.id)) : response;
+        if (!providerUsageListOnly) {
+          for (const report of reports) {
+            ws.send(
+              JSON.stringify({
+                type: "session",
+                message: { type: "usage.list_reports.update", payload: { requestId, report } },
+              }),
+            );
+          }
+        }
         const reply = providerUsageListOnly
           ? {
               type: "provider.usage.list.response",
@@ -175,7 +185,7 @@ export async function installUsageReportsFixture(
                 })),
               },
             }
-          : { type: "usage.list_reports.response", payload: { requestId, reports } };
+          : { type: "usage.list_reports.response", payload: { requestId, error: null } };
         ws.send(JSON.stringify({ type: "session", message: reply }));
         listCounter.increment();
         return;
