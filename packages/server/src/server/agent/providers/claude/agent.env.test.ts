@@ -90,8 +90,10 @@ describe("Claude SDK env", () => {
       expect(capturedEnv?.PASEO_TEST_FLAG).toBe(launchContext.env?.PASEO_TEST_FLAG);
       expect(capturedEnv?.MCP_TIMEOUT).toBe("claude-startup-timeout");
       expect(capturedEnv?.MCP_TOOL_TIMEOUT).toBe("claude-tool-timeout");
+      expect(session.usageSession?.()?.env).toBe(capturedEnv);
     } finally {
       await session.close();
+      expect(session.usageSession?.()).toBeNull();
     }
   });
 
@@ -156,6 +158,7 @@ describe("Claude SDK env", () => {
       expect(capturedEnv?.PASEO_TEST_FLAG).toBe(launchContext.env?.PASEO_TEST_FLAG);
     } finally {
       await session.close();
+      expect(session.usageSession?.()).toBeNull();
     }
   });
 });

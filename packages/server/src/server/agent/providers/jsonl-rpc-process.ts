@@ -80,6 +80,10 @@ export class JsonlRpcProcess {
   private readonly exitSubscribers = new Set<(exit: JsonlRpcExit) => void>();
   private stderrBuffer = "";
   private nextRequestId = 1;
+  get isRunning(): boolean {
+    return !this.disposed && !this.exited;
+  }
+
   private disposed = false;
   private exited = false;
   private closing: Promise<void> | null = null;

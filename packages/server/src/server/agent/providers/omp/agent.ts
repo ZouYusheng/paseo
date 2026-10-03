@@ -723,6 +723,17 @@ export class OmpAgentSession implements AgentSession {
   private readonly emittedUserMessageIds = new Set<string>();
   private customMessageIndex = 0;
 
+  usageSession() {
+    const env = this.runtimeSession.environment;
+    if (this.closed || !env) return null;
+    return {
+      provider: "omp",
+      model: modelToId(this.state.model) ?? undefined,
+      env,
+      sessionKey: this.runtimeSession,
+    };
+  }
+
   constructor(options: OmpAgentSessionOptions) {
     this.runtimeSession = options.runtimeSession;
     this.hostTools = options.hostTools;

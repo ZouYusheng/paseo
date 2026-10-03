@@ -2053,6 +2053,7 @@ class ClaudeAgentSession implements AgentSession {
   private readonly queryFactory?: ClaudeQueryFactory;
   private readonly resolveBinary: () => Promise<string>;
   private query: Query | null = null;
+  private harnessEnvironment: Record<string, string> | null = null;
   private childProcess: ChildProcess | null = null;
   private input: AsyncMessageInput<SDKUserMessage> | null = null;
   /** The exact SDK query/input pair that owns the current foreground turn. */
@@ -3255,7 +3256,17 @@ class ClaudeAgentSession implements AgentSession {
     );
   }
 
-  private buildSdkEnv(): NodeJS.ProcessEnv {
+  usageSession() {
+    if (this.closed || !this.query || !this.harnessEnvironment) return null;
+    return {
+      provider: "claude",
+      model: this.config.model,
+      env: this.harnessEnvironment,
+      sessionKey: this.query,
+    };
+  }
+
+  private buildSdkEnv() {
     return createProviderEnv({
       baseEnv: process.env,
       runtimeSettings: this.runtimeSettings,
@@ -3272,6 +3283,7 @@ class ClaudeAgentSession implements AgentSession {
     );
     const settingsOptions = this.buildSettingsOptions(providerOptions, { ultracode });
     const sdkEnv = this.buildSdkEnv();
+    this.harnessEnvironment = sdkEnv;
     assertClaudeModeCanRun(this.currentMode, sdkEnv);
 
     const claudeBinary = await this.resolveBinary();

@@ -1501,6 +1501,7 @@ export class OpenCodeAgentClient implements AgentClient {
         false,
         unbindBridge,
         connectServer,
+        connection.environment,
       );
     } catch (error) {
       await connection.release();
@@ -1555,6 +1556,7 @@ export class OpenCodeAgentClient implements AgentClient {
         registeredAcquisition !== null,
         unbindBridge,
         connectServer,
+        connection.environment,
       );
     } catch (error) {
       await connection.release();
@@ -1594,6 +1596,7 @@ export class OpenCodeAgentClient implements AgentClient {
     return {
       client: this.createOpenCodeClient({ baseUrl: acquisition.server.url, directory }),
       events: acquisition.events,
+      environment: acquisition.environment,
       url: acquisition.server.url,
       release: acquisition.release,
     };
@@ -3357,6 +3360,7 @@ async function listOpenCodeChildSessions(
 
 /** One OpenCode server generation a session talks to. */
 interface OpenCodeServerConnection {
+  environment?: Record<string, string>;
   client: OpencodeClient;
   events: OpenCodeEventSource;
   url: string;
@@ -3451,9 +3455,10 @@ class OpenCodeAgentSession implements AgentSession {
     private readonly externallyDriven = false,
     releaseBridge?: () => void,
     connectServer?: () => Promise<OpenCodeServerConnection>,
+    environment?: Record<string, string>,
   ) {
     this.config = config;
-    this.server = { client, events, url: serverUrl ?? "", release: releaseServer };
+    this.server = { client, events, url: serverUrl ?? "", release: releaseServer, environment };
     this.connectServer = connectServer ?? null;
     this.sessionId = sessionId;
     this.logger = logger.child({ agentId: this.agentId });
@@ -3466,6 +3471,16 @@ class OpenCodeAgentSession implements AgentSession {
       config.model,
     );
     this.subscribeServerEvents();
+  }
+
+  usageSession() {
+    if (this.closed || this.serverExited || !this.server.environment) return null;
+    return {
+      provider: "opencode",
+      model: this.config.model,
+      env: this.server.environment,
+      sessionKey: this.server.events,
+    };
   }
 
   private get client(): OpencodeClient {

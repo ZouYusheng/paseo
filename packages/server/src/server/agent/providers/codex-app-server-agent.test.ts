@@ -698,6 +698,11 @@ process.stdin.on("data", (chunk) => {
   });
 
   try {
+    expect(session.usageSession?.()).toMatchObject({
+      provider: "codex",
+      env: { CODEX_HOME: providerCodexHome },
+    });
+    expect(session.usageSession?.()?.sessionKey).toBe(session.usageSession?.()?.sessionKey);
     return await run({
       session,
       readCaptured: () =>
@@ -708,6 +713,7 @@ process.stdin.on("data", (chunk) => {
     });
   } finally {
     await session.close();
+    expect(session.usageSession?.()).toBeNull();
     vi.unstubAllEnvs();
     rmSync(tempDir, { recursive: true, force: true });
   }

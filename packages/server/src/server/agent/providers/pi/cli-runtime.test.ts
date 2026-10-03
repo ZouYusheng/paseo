@@ -146,7 +146,12 @@ describe("PiCliRuntime", () => {
     const launches: PiRuntimeLaunch[] = [];
     const runtime = createRuntime(child, launches);
 
-    const session = await runtime.startSession({ cwd: "/workspace/project" });
+    const session = await runtime.startSession({
+      cwd: "/workspace/project",
+      env: { HOME: "/fixture/pi-home" },
+    });
+    expect(session.environment).toBe(launches[0]?.env);
+    expect(session.environment?.HOME).toBe("/fixture/pi-home");
 
     await expect(session.getState()).resolves.toMatchObject({
       sessionId: "pi-session-1",
