@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { normalizeProviderReplayTimestamp } from "../../provider-history-timestamps.js";
 import {
   parseClaudeSubagentMeta,
@@ -26,99 +25,81 @@ interface RecordLocation {
 /** Chunk in bytes so UTF-8 and multi-chunk records are decoded once, at a line boundary. */
 function* locatedRecords(
   file: string,
+  fd: number,
 ): Generator<{ entry: TranscriptEntry; location: RecordLocation }> {
-  const fd = fs.openSync(file, "r");
-  try {
-    const stat = fs.fstatSync(fd);
-    // Opening a directory succeeds on some platforms; it must never look like empty history.
-    if (stat.isDirectory()) {
-      throw Object.assign(new Error(`EISDIR: illegal operation on a directory, read '${file}'`), {
-        code: "EISDIR",
-        syscall: "read",
-        path: file,
-      });
-    }
-    let remaining = stat.size;
-    let offset = 0;
-    let pieces: Buffer[] = [];
-    let length = 0;
-    while (remaining > 0) {
-      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
-      const count = fs.readSync(fd, buffer, 0, buffer.length, null);
-      if (count === 0) break;
-      remaining -= count;
-      let start = 0;
-      let end: number;
-      while ((end = buffer.indexOf(10, start)) !== -1 && end < count) {
-        pieces.push(buffer.subarray(start, end));
-        length += end - start;
-        const entry = parseRecord(Buffer.concat(pieces, length).toString("utf8"));
-        const location = {
-          file,
-          offset,
-          length,
-          timestamp: normalizeProviderReplayTimestamp(entry?.timestamp),
-        };
-        offset += length + 1;
-        pieces = [];
-        length = 0;
-        if (entry) yield { entry, location };
-        start = end + 1;
-      }
-      if (start < count) {
-        pieces.push(buffer.subarray(start, count));
-        length += count - start;
-      }
-    }
-    const entry = parseRecord(Buffer.concat(pieces, length).toString("utf8"));
-    if (entry)
-      yield {
-        entry,
-        location: {
-          file,
-          offset,
-          length,
-          timestamp: normalizeProviderReplayTimestamp(entry.timestamp),
-        },
-      };
-  } finally {
-    fs.closeSync(fd);
+  const stat = fs.fstatSync(fd);
+  // Opening a directory succeeds on some platforms; it must never look like empty history.
+  if (stat.isDirectory()) {
+    throw Object.assign(new Error(`EISDIR: illegal operation on a directory, read '${file}'`), {
+      code: "EISDIR",
+      syscall: "read",
+      path: file,
+    });
   }
+  let remaining = stat.size;
+  let offset = 0;
+  let pieces: Buffer[] = [];
+  let length = 0;
+  while (remaining > 0) {
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+    const count = fs.readSync(fd, buffer, 0, buffer.length, null);
+    if (count === 0) break;
+    remaining -= count;
+    let start = 0;
+    let end: number;
+    while ((end = buffer.indexOf(10, start)) !== -1 && end < count) {
+      pieces.push(buffer.subarray(start, end));
+      length += end - start;
+      const entry = parseRecord(Buffer.concat(pieces, length).toString("utf8"));
+      const location = {
+        file,
+        offset,
+        length,
+        timestamp: normalizeProviderReplayTimestamp(entry?.timestamp),
+      };
+      offset += length + 1;
+      pieces = [];
+      length = 0;
+      if (entry) yield { entry, location };
+      start = end + 1;
+    }
+    if (start < count) {
+      pieces.push(buffer.subarray(start, count));
+      length += count - start;
+    }
+  }
+  const entry = parseRecord(Buffer.concat(pieces, length).toString("utf8"));
+  if (entry)
+    yield {
+      entry,
+      location: {
+        file,
+        offset,
+        length,
+        timestamp: normalizeProviderReplayTimestamp(entry.timestamp),
+      },
+    };
 }
 
-/** Indexed sources parse only their own records from the replay-owned snapshots. */
-function indexedRecords(locations: readonly RecordLocation[]): Iterable<TranscriptEntry> {
+/** Indexed sources parse only their own records using descriptors owned by this replay. */
+function indexedRecords(
+  locations: readonly RecordLocation[],
+  descriptors: ReadonlyMap<string, number>,
+): Iterable<TranscriptEntry> {
   return {
     *[Symbol.iterator]() {
-      let fd: number | null = null;
-      let currentFile: string | null = null;
-      try {
-        for (const location of locations) {
-          if (currentFile !== location.file) {
-            if (fd !== null) fs.closeSync(fd);
-            fd = null;
-            fd = fs.openSync(location.file, "r");
-            currentFile = location.file;
-          }
-          const buffer = Buffer.allocUnsafe(location.length);
-          let read = 0;
-          while (read < buffer.length) {
-            const count = fs.readSync(
-              fd!,
-              buffer,
-              read,
-              buffer.length - read,
-              location.offset + read,
-            );
-            if (count === 0)
-              throw new Error(`Claude transcript was truncated during replay: ${location.file}`);
-            read += count;
-          }
-          const entry = parseRecord(buffer.toString("utf8"));
-          if (entry) yield entry;
+      for (const location of locations) {
+        const fd = descriptors.get(location.file)!;
+        const buffer = Buffer.allocUnsafe(location.length);
+        let read = 0;
+        while (read < buffer.length) {
+          const count = fs.readSync(fd, buffer, read, buffer.length - read, location.offset + read);
+          if (count === 0)
+            throw new Error(`Claude transcript was truncated during replay: ${location.file}`);
+          read += count;
         }
-      } finally {
-        if (fd !== null) fs.closeSync(fd);
+        const entry = parseRecord(buffer.toString("utf8"));
+        if (entry) yield entry;
       }
     },
   };
@@ -163,21 +144,21 @@ export interface ClaudeReplayHistory {
   workflowEntriesByRunId: Map<string, Iterable<TranscriptEntry>>;
 }
 
-/** Own snapshots through every pass so unlink, rename or truncation of provider files cannot
- * invalidate discovered history. Sources must be consumed before the callback returns. */
+/** Own descriptors through every pass so unlink or rename cannot invalidate discovered history.
+ * Sources must be consumed before the callback returns. No transcript copies are needed. */
 export function withClaudeReplayHistory<T>(
   historyPath: string,
   consume: (history: ClaudeReplayHistory) => T,
 ): T {
-  const snapshotDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "claude-replay-"));
+  const descriptors = new Map<string, number>();
   try {
-    return consume(indexHistory(historyPath, snapshotDirectory));
+    return consume(indexHistory(historyPath, descriptors));
   } finally {
-    fs.rmSync(snapshotDirectory, { recursive: true, force: true });
+    for (const fd of descriptors.values()) fs.closeSync(fd);
   }
 }
 
-function indexHistory(historyPath: string, snapshotDirectory: string): ClaudeReplayHistory {
+function indexHistory(historyPath: string, descriptors: Map<string, number>): ClaudeReplayHistory {
   const sessionDirectory = path.join(
     path.dirname(historyPath),
     path.basename(historyPath, ".jsonl"),
@@ -216,15 +197,13 @@ function indexHistory(historyPath: string, snapshotDirectory: string): ClaudeRep
   }
   const parentLocations: RecordLocation[] = [];
   const locationsByAgentId = new Map<string, RecordLocation[]>();
-  let snapshotIndex = 0;
   function scan(
     file: string,
     visit: (entry: TranscriptEntry, location: RecordLocation) => void,
   ): void {
-    const snapshot = path.join(snapshotDirectory, `${snapshotIndex++}.jsonl`);
-    // Reflink where available; otherwise copy on disk, never into the daemon heap.
-    fs.copyFileSync(file, snapshot, fs.constants.COPYFILE_FICLONE);
-    for (const { entry, location } of locatedRecords(snapshot)) visit(entry, location);
+    const fd = fs.openSync(file, "r");
+    descriptors.set(file, fd);
+    for (const { entry, location } of locatedRecords(file, fd)) visit(entry, location);
   }
   for (const file of sidechainFiles) {
     scan(file, (entry, location) => {
@@ -248,14 +227,14 @@ function indexHistory(historyPath: string, snapshotDirectory: string): ClaudeRep
       if (!b.timestamp) return -1;
       return Date.parse(a.timestamp) - Date.parse(b.timestamp);
     });
-    workflowEntriesByRunId.set(runId, indexedRecords(locations));
+    workflowEntriesByRunId.set(runId, indexedRecords(locations, descriptors));
   }
   return {
-    parentEntries: indexedRecords(parentLocations),
+    parentEntries: indexedRecords(parentLocations, descriptors),
     subagents: [...locationsByAgentId].map(([agentId, locations]) => ({
       agentId,
       meta: metaByAgentId.get(agentId) ?? null,
-      entries: indexedRecords(locations),
+      entries: indexedRecords(locations, descriptors),
     })),
     workflows: readWorkflows(sessionDirectory),
     workflowEntriesByRunId,

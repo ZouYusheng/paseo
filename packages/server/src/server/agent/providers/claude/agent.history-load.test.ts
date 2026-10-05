@@ -92,6 +92,18 @@ describe("ClaudeAgentSession persisted history load", () => {
     );
   });
 
+  test("loads readable history when the temporary directory is unavailable", () => {
+    const file = transcriptPath();
+    const entry = { type: "assistant", message: { content: [{ type: "text", text: "saved" }] } };
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(entry));
+    const unavailable = path.join(tempRoot, "unavailable-tmp");
+    for (const variable of ["TMPDIR", "TEMP", "TMP"]) vi.stubEnv(variable, unavailable);
+    withClaudeReplayHistory(file, (history) => {
+      expect([...history.parentEntries]).toEqual([entry]);
+    });
+  });
+
   test.each(["parent", "child", "workflow"])(
     "preserves indexed %s history when its transcript disappears between passes",
     (target) => {
