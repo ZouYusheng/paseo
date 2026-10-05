@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { normalizeProviderReplayTimestamp } from "../../provider-history-timestamps.js";
 import {
   parseClaudeSubagentMeta,
@@ -85,55 +86,35 @@ function* locatedRecords(
   }
 }
 
-/** Repeatable sources let ownership be resolved before replay without retaining raw records. */
-function records(file: string): Iterable<TranscriptEntry> {
+/** Indexed sources parse only their own records from the replay-owned snapshots. */
+function indexedRecords(locations: readonly RecordLocation[]): Iterable<TranscriptEntry> {
   return {
     *[Symbol.iterator]() {
-      for (const { entry } of locatedRecords(file)) yield entry;
-    },
-  };
-}
-
-/** Workflow children share a timeline. Sort byte locations, then parse in that order so tool
- * results see their declarations even when directory order differs from chronological order. */
-function workflowRecords(files: readonly string[]): Iterable<TranscriptEntry> {
-  return {
-    *[Symbol.iterator]() {
-      const locations: RecordLocation[] = [];
-      for (const file of files)
-        for (const { entry, location } of locatedRecords(file)) {
-          if (entry.type !== "user" || isToolResult(entry)) locations.push(location);
-        }
-      locations.sort((a, b) => {
-        if (!a.timestamp && !b.timestamp) return 0;
-        if (!a.timestamp) return 1;
-        if (!b.timestamp) return -1;
-        return Date.parse(a.timestamp) - Date.parse(b.timestamp);
-      });
-      let currentFile: string | null = null;
       let fd: number | null = null;
+      let currentFile: string | null = null;
       try {
         for (const location of locations) {
-          if (fd === null || currentFile !== location.file) {
+          if (currentFile !== location.file) {
             if (fd !== null) fs.closeSync(fd);
             fd = null;
+            fd = fs.openSync(location.file, "r");
             currentFile = location.file;
-            fd = fs.openSync(currentFile, "r");
           }
           const buffer = Buffer.allocUnsafe(location.length);
           let read = 0;
           while (read < buffer.length) {
             const count = fs.readSync(
-              fd,
+              fd!,
               buffer,
               read,
               buffer.length - read,
               location.offset + read,
             );
-            if (count === 0) break;
+            if (count === 0)
+              throw new Error(`Claude transcript was truncated during replay: ${location.file}`);
             read += count;
           }
-          const entry = parseRecord(buffer.subarray(0, read).toString("utf8"));
+          const entry = parseRecord(buffer.toString("utf8"));
           if (entry) yield entry;
         }
       } finally {
@@ -161,17 +142,6 @@ function parseRecord(line: string): TranscriptEntry | null {
   }
 }
 
-function selectRecords(
-  files: readonly string[],
-  accept: (entry: TranscriptEntry) => boolean,
-): Iterable<TranscriptEntry> {
-  return {
-    *[Symbol.iterator]() {
-      for (const file of files) for (const entry of records(file)) if (accept(entry)) yield entry;
-    },
-  };
-}
-
 function readOptionalFile(file: string): string | null {
   try {
     return fs.readFileSync(file, "utf8");
@@ -182,7 +152,7 @@ function readOptionalFile(file: string): string | null {
 
 /** Discover sources without retaining transcript contents. Unrelated sidechains stay excluded
  * by the replay ownership resolver; workflow children retain their separate run ownership. */
-export function readClaudeReplayHistory(historyPath: string): {
+export interface ClaudeReplayHistory {
   parentEntries: Iterable<TranscriptEntry>;
   subagents: {
     agentId: string;
@@ -191,7 +161,23 @@ export function readClaudeReplayHistory(historyPath: string): {
   }[];
   workflows: ClaudeWorkflowRun[];
   workflowEntriesByRunId: Map<string, Iterable<TranscriptEntry>>;
-} {
+}
+
+/** Own snapshots through every pass so unlink, rename or truncation of provider files cannot
+ * invalidate discovered history. Sources must be consumed before the callback returns. */
+export function withClaudeReplayHistory<T>(
+  historyPath: string,
+  consume: (history: ClaudeReplayHistory) => T,
+): T {
+  const snapshotDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "claude-replay-"));
+  try {
+    return consume(indexHistory(historyPath, snapshotDirectory));
+  } finally {
+    fs.rmSync(snapshotDirectory, { recursive: true, force: true });
+  }
+}
+
+function indexHistory(historyPath: string, snapshotDirectory: string): ClaudeReplayHistory {
   const sessionDirectory = path.join(
     path.dirname(historyPath),
     path.basename(historyPath, ".jsonl"),
@@ -228,33 +214,51 @@ export function readClaudeReplayHistory(historyPath: string): {
       if (meta) metaByAgentId.set(agentId, meta);
     }
   }
-  const filesByAgentId = new Map<string, string[]>();
+  const parentLocations: RecordLocation[] = [];
+  const locationsByAgentId = new Map<string, RecordLocation[]>();
+  let snapshotIndex = 0;
+  function scan(
+    file: string,
+    visit: (entry: TranscriptEntry, location: RecordLocation) => void,
+  ): void {
+    const snapshot = path.join(snapshotDirectory, `${snapshotIndex++}.jsonl`);
+    // Reflink where available; otherwise copy on disk, never into the daemon heap.
+    fs.copyFileSync(file, snapshot, fs.constants.COPYFILE_FICLONE);
+    for (const { entry, location } of locatedRecords(snapshot)) visit(entry, location);
+  }
   for (const file of sidechainFiles) {
-    const agentsInFile = new Set<string>();
-    for (const entry of records(file)) {
-      if (entry.isSidechain === true && typeof entry.agentId === "string")
-        agentsInFile.add(entry.agentId);
-    }
-    for (const agentId of agentsInFile) {
-      const files = filesByAgentId.get(agentId) ?? [];
-      files.push(file);
-      filesByAgentId.set(agentId, files);
-    }
+    scan(file, (entry, location) => {
+      if (file === historyPath && entry.isSidechain !== true) parentLocations.push(location);
+      if (entry.isSidechain !== true || typeof entry.agentId !== "string") return;
+      const locations = locationsByAgentId.get(entry.agentId) ?? [];
+      locations.push(location);
+      locationsByAgentId.set(entry.agentId, locations);
+    });
+  }
+  const workflowEntriesByRunId = new Map<string, Iterable<TranscriptEntry>>();
+  for (const [runId, files] of workflowFiles) {
+    const locations: RecordLocation[] = [];
+    for (const file of files)
+      scan(file, (entry, location) => {
+        if (entry.type !== "user" || isToolResult(entry)) locations.push(location);
+      });
+    locations.sort((a, b) => {
+      if (!a.timestamp && !b.timestamp) return 0;
+      if (!a.timestamp) return 1;
+      if (!b.timestamp) return -1;
+      return Date.parse(a.timestamp) - Date.parse(b.timestamp);
+    });
+    workflowEntriesByRunId.set(runId, indexedRecords(locations));
   }
   return {
-    parentEntries: selectRecords([historyPath], (entry) => entry.isSidechain !== true),
-    subagents: [...filesByAgentId].map(([agentId, files]) => ({
+    parentEntries: indexedRecords(parentLocations),
+    subagents: [...locationsByAgentId].map(([agentId, locations]) => ({
       agentId,
       meta: metaByAgentId.get(agentId) ?? null,
-      entries: selectRecords(
-        files,
-        (entry) => entry.isSidechain === true && entry.agentId === agentId,
-      ),
+      entries: indexedRecords(locations),
     })),
     workflows: readWorkflows(sessionDirectory),
-    workflowEntriesByRunId: new Map(
-      [...workflowFiles].map(([runId, files]) => [runId, workflowRecords(files)]),
-    ),
+    workflowEntriesByRunId,
   };
 }
 

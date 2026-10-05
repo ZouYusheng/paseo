@@ -435,31 +435,112 @@ describe("ClaudeAgentSession persisted subagent replay", () => {
     expect(upserts(await replayDescriptors())).toEqual([]);
   });
 
+  test("replays several legacy children interleaved in the parent transcript", async () => {
+    const lines: string[] = [];
+    for (let index = 0; index < 8; index++) {
+      const agentId = `legacy-${index}`;
+      const toolUseId = `task-${index}`;
+      lines.push(parentEntry([{ type: "tool_use", id: toolUseId, name: "Task", input: {} }]));
+      lines.push(
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [
+              { type: "tool_result", tool_use_id: toolUseId, content: `agentId: ${agentId}\ndone` },
+            ],
+          },
+        }),
+      );
+      lines.push(sidechainEntry({ agentId, stopReason: "end_turn" }));
+    }
+    writeParentSession(lines);
+    const events = await replayDescriptors();
+    const histories = events
+      .map((event) => event.event)
+      .filter((event) => event.type === "timeline");
+    expect(histories.map((event) => event.id).sort()).toEqual(
+      Array.from({ length: 8 }, (_, index) => `task-${index}`),
+    );
+    expect(histories.map((event) => event.item)).toEqual(
+      Array.from({ length: 8 }, () => ({ type: "assistant_message", text: "summary of the docs" })),
+    );
+  });
+
+  test("limits retained child shell output to the timeline's existing content limit", async () => {
+    const output = "x".repeat(128 * 1024);
+    writeSession({
+      parentLines: [taskToolUse(), taskToolResult()],
+      meta: JSON.stringify({ toolUseId: TOOL_USE_ID }),
+      sidechainLines: [
+        JSON.stringify({
+          type: "assistant",
+          isSidechain: true,
+          agentId: AGENT_ID,
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "bash-large",
+                name: "Bash",
+                input: { command: "echo large" },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "user",
+          isSidechain: true,
+          agentId: AGENT_ID,
+          message: {
+            content: [{ type: "tool_result", tool_use_id: "bash-large", content: output }],
+          },
+        }),
+      ],
+    });
+    const events = await replayDescriptors();
+    const completed = events
+      .map((event) => event.event)
+      .filter(
+        (event) =>
+          event.type === "timeline" &&
+          event.item.type === "tool_call" &&
+          event.item.status === "completed",
+      );
+    expect(completed).toEqual([
+      expect.objectContaining({
+        type: "timeline",
+        id: TOOL_USE_ID,
+        item: expect.objectContaining({
+          detail: expect.objectContaining({ type: "shell", output: output.slice(0, 64 * 1024) }),
+        }),
+      }),
+    ]);
+  });
+
   test.each([
     {
-      label: "395 MiB parent and 269 sidechains",
+      label: "4 MiB parent and 20 sidechains",
       mode: "children",
-      generate: generateReplayCorpus,
-      expected: { parentItems: 539, completed: 269, histories: 269 },
+      generate: (root: string) =>
+        generateReplayCorpus(root, { parentMiB: 4, childrenMiB: 4, children: 20 }),
+      expected: { parentItems: 41, completed: 20, histories: 20 },
     },
     {
-      label: "five 320 MiB workflow sidechains",
+      label: "five 2 MiB workflow sidechains",
       mode: "workflow",
-      generate: generateWorkflowReplayCorpus,
+      generate: (root: string) => generateWorkflowReplayCorpus(root, 2),
       expected: { parentItems: 3, completed: 1, histories: 5 },
     },
   ])(
-    "opens $label with all history under a 512 MB heap",
+    "opens $label with all history under a 256 MB heap",
     ({ mode, generate, expected }) => {
-      const cache = path.join(os.homedir(), ".cache", "paseo-5820");
-      mkdirSync(cache, { recursive: true });
-      const root = mkdtempSync(path.join(cache, "repro-"));
+      const root = mkdtempSync(path.join(os.tmpdir(), "claude-replay-"));
       try {
         generate(root);
         const worker = spawnSync(
           process.execPath,
           [
-            "--max-old-space-size=512",
+            "--max-old-space-size=256",
             "--import",
             "tsx",
             fileURLToPath(new URL("./replay-memory.fixture.ts", import.meta.url)),

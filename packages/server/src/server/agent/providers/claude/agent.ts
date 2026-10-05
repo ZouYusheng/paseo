@@ -43,7 +43,7 @@ import {
   resolveClaudeDisabledThinkingForModel,
 } from "./model-manifest.js";
 import { parsePartialJsonObject } from "./partial-json.js";
-import { readClaudeReplayHistory } from "./transcript-history.js";
+import { withClaudeReplayHistory, type ClaudeReplayHistory } from "./transcript-history.js";
 import { ClaudeSidechainTracker } from "./sidechain-tracker.js";
 import { ClaudeTaskState } from "./task-state.js";
 import {
@@ -53,6 +53,7 @@ import {
 import { observeReplaySubagents, type ClaudeReplayParentFacts } from "./subagents/replay-source.js";
 import { foldSubagentObservations, type SubagentObservation } from "./subagents/observation.js";
 import { observeReplayWorkflows } from "./subagents/workflow-replay-source.js";
+import { limitAgentTimelineItemContent } from "../../agent-timeline-content.js";
 import { readClaudeWorkflowResultFile } from "./subagents/workflow-output.js";
 import { buildClaudeFeatures, claudeModelSupportsFastMode } from "./feature-definitions.js";
 import {
@@ -4929,9 +4930,10 @@ class ClaudeAgentSession implements AgentSession {
         );
         return;
       }
-      const history = readClaudeReplayHistory(historyPath);
-      const replay = this.ingestPersistedSidechains(history);
-      this.ingestPersistedHistory(history.parentEntries, replay);
+      withClaudeReplayHistory(historyPath, (history) => {
+        const replay = this.ingestPersistedSidechains(history);
+        this.ingestPersistedHistory(history.parentEntries, replay);
+      });
     } catch (error) {
       this.logger.warn(
         { err: error, sessionId, historyPath },
@@ -4955,9 +4957,7 @@ class ClaudeAgentSession implements AgentSession {
     }
   }
 
-  private ingestPersistedSidechains(
-    history: ReturnType<typeof readClaudeReplayHistory>,
-  ): ClaudeReplayOwnership {
+  private ingestPersistedSidechains(history: ClaudeReplayHistory): ClaudeReplayOwnership {
     const parentFacts = readClaudeReplayParentFacts(history.parentEntries);
 
     // Replay produces the same observations the live task protocol produces, then folds them
@@ -5092,7 +5092,9 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   private convertHistoryEntry(entry: ClaudeHistoryEntry): AgentTimelineItem[] {
-    return convertClaudeHistoryEntry(entry, (content) => this.mapBlocksToTimeline(content));
+    return convertClaudeHistoryEntry(entry, (content) => this.mapBlocksToTimeline(content)).map(
+      limitAgentTimelineItemContent,
+    );
   }
 
   // Maps Claude content blocks into AgentTimelineItems.

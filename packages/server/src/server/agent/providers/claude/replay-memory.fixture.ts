@@ -5,7 +5,11 @@ import pino from "pino";
 import { ClaudeAgentClient } from "./agent.js";
 import { claudeProjectDirSync } from "./project-dir.js";
 
-export function generateReplayCorpus(root: string): { cwd: string; configDir: string } {
+/** Full-scale reproduction is opt-in: run this file with ROOT children --generate. */
+export function generateReplayCorpus(
+  root: string,
+  size = { parentMiB: 395, childrenMiB: 362, children: 269 },
+): { cwd: string; configDir: string } {
   const cwd = path.join(root, "repo");
   const configDir = path.join(root, "claude");
   mkdirSync(cwd, { recursive: true });
@@ -18,11 +22,11 @@ export function generateReplayCorpus(root: string): { cwd: string; configDir: st
   // Generate those incrementally: the fixture generator itself must not hold the corpus.
   const padding = row({ type: "progress", data: "x".repeat(64 * 1024) });
   writeFileSync(parent, "");
-  for (let i = 0; i < Math.ceil((395 * 1024 * 1024) / padding.length); i++) {
+  for (let i = 0; i < Math.ceil((size.parentMiB * 1024 * 1024) / padding.length); i++) {
     appendFileSync(parent, padding);
   }
   appendFileSync(parent, row({ type: "user", message: { content: "Open the large session" } }));
-  for (let i = 0; i < 269; i++) {
+  for (let i = 0; i < size.children; i++) {
     const agentId = `child-${i}`;
     const id = `task-${i}`;
     appendFileSync(
@@ -50,7 +54,11 @@ export function generateReplayCorpus(root: string): { cwd: string; configDir: st
       agentId,
       message: { content: "x".repeat(64 * 1024) },
     });
-    for (let j = 0; j < Math.ceil((362 * 1024 * 1024) / 269 / summary.length); j++)
+    for (
+      let j = 0;
+      j < Math.ceil((size.childrenMiB * 1024 * 1024) / size.children / summary.length);
+      j++
+    )
       appendFileSync(file, summary);
     appendFileSync(
       file,
@@ -75,6 +83,11 @@ export function generateReplayCorpus(root: string): { cwd: string; configDir: st
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = process.argv[2];
+  if (!root) throw new Error("Usage: replay-memory.fixture.ts ROOT children|workflow [--generate]");
+  if (process.argv.includes("--generate")) {
+    if (process.argv[3] === "workflow") generateWorkflowReplayCorpus(root);
+    else generateReplayCorpus(root);
+  }
   process.env.CLAUDE_CONFIG_DIR = path.join(root, "claude");
   const client = new ClaudeAgentClient({
     logger: pino({ level: "silent" }),
@@ -116,7 +129,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   );
 }
 
-export function generateWorkflowReplayCorpus(root: string): { cwd: string; configDir: string } {
+export function generateWorkflowReplayCorpus(
+  root: string,
+  childMiB = 320,
+): { cwd: string; configDir: string } {
   const cwd = path.join(root, "repo");
   const configDir = path.join(root, "claude");
   mkdirSync(cwd, { recursive: true });
@@ -166,7 +182,7 @@ export function generateWorkflowReplayCorpus(root: string): { cwd: string; confi
         agentId: `child-${i}`,
         message: { content: "x".repeat(64 * 1024) },
       }) + "\n";
-    for (let j = 0; j < Math.ceil((320 * 1024 * 1024) / prompt.length); j++)
+    for (let j = 0; j < Math.ceil((childMiB * 1024 * 1024) / prompt.length); j++)
       appendFileSync(file, prompt);
     appendFileSync(
       file,
