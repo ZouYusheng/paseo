@@ -1,7 +1,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import pino from "pino";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { generateReplayCorpus, generateWorkflowReplayCorpus } from "./replay-memory.fixture.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
@@ -433,241 +435,132 @@ describe("ClaudeAgentSession persisted subagent replay", () => {
     expect(upserts(await replayDescriptors())).toEqual([]);
   });
 
-  test("skips subagent history replay when the transcript exceeds the replay budget", async () => {
-    // Issue #5820: loading every sidechain transcript at once OOMs the daemon worker on large
-    // sessions. Over budget, the sidechain files stay unread and the parent history still loads.
-    vi.stubEnv("PASEO_CLAUDE_REPLAY_BUDGET_MB", "1");
-    const bulkEntry = JSON.stringify({
-      type: "user",
-      isSidechain: true,
-      agentId: AGENT_ID,
-      sessionId: "replay-session",
-      timestamp: "2026-07-26T06:27:55.000Z",
-      message: { role: "user", content: "x".repeat(1024 * 1024 + 8192) },
-    });
-    writeSession({
-      parentLines: [taskToolUse(), taskToolResult()],
-      meta: JSON.stringify({ toolUseId: TOOL_USE_ID }),
-      sidechainLines: [sidechainEntry(), bulkEntry],
-    });
+  test.each([
+    {
+      label: "395 MiB parent and 269 sidechains",
+      mode: "children",
+      generate: generateReplayCorpus,
+      expected: { parentItems: 539, completed: 269, histories: 269 },
+    },
+    {
+      label: "five 320 MiB workflow sidechains",
+      mode: "workflow",
+      generate: generateWorkflowReplayCorpus,
+      expected: { parentItems: 3, completed: 1, histories: 5 },
+    },
+  ])(
+    "opens $label with all history under a 512 MB heap",
+    ({ mode, generate, expected }) => {
+      const cache = path.join(os.homedir(), ".cache", "paseo-5820");
+      mkdirSync(cache, { recursive: true });
+      const root = mkdtempSync(path.join(cache, "repro-"));
+      try {
+        generate(root);
+        const worker = spawnSync(
+          process.execPath,
+          [
+            "--max-old-space-size=512",
+            "--import",
+            "tsx",
+            fileURLToPath(new URL("./replay-memory.fixture.ts", import.meta.url)),
+            root,
+            mode,
+          ],
+          { encoding: "utf8", env: { ...process.env, NODE_NO_WARNINGS: "1" }, timeout: 120_000 },
+        );
+        expect({ status: worker.status, signal: worker.signal, stderr: worker.stderr }).toEqual({
+          status: 0,
+          signal: null,
+          stderr: "",
+        });
+        const result = JSON.parse(worker.stdout);
+        expect(result).toMatchObject(expected);
+        console.log("Claude replay memory:", result);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    150_000,
+  );
 
-    const events = await replayEvents();
-
-    expect(events.filter((event) => event.type === "provider_subagent")).toEqual([]);
-
-    const parentTaskCalls = events.filter(
-      (event) =>
-        event.type === "timeline" &&
-        event.item.type === "tool_call" &&
-        event.item.callId === TOOL_USE_ID,
-    );
-    expect(parentTaskCalls.length).toBeGreaterThanOrEqual(1);
-  });
-
-  test("still replays subagent history when the transcript is under the replay budget", async () => {
-    vi.stubEnv("PASEO_CLAUDE_REPLAY_BUDGET_MB", "16");
-    writeSession({
-      parentLines: [taskToolUse(), taskToolResult()],
-      meta: JSON.stringify({ toolUseId: TOOL_USE_ID }),
-      sidechainLines: [sidechainEntry({ stopReason: "end_turn" })],
-    });
-
-    const descriptors = upserts(await replayDescriptors());
-    expect(descriptors.map((descriptor) => descriptor.id)).toContain(TOOL_USE_ID);
-    expect(descriptors.at(-1)).toMatchObject({ id: TOOL_USE_ID, status: "completed" });
-  });
-
-  test("falls back to the default budget when the env override is not a positive number", async () => {
-    vi.stubEnv("PASEO_CLAUDE_REPLAY_BUDGET_MB", "0");
-    writeSession({
-      parentLines: [taskToolUse(), taskToolResult()],
-      meta: JSON.stringify({ toolUseId: TOOL_USE_ID }),
-      sidechainLines: [sidechainEntry({ stopReason: "end_turn" })],
-    });
-
-    const descriptors = upserts(await replayDescriptors());
-    expect(descriptors.map((descriptor) => descriptor.id)).toContain(TOOL_USE_ID);
-  });
-
-  test("honors a fractional replay budget instead of rounding it up to the default", async () => {
-    // 0.5 MB is 524,288 bytes; parseInt would read it as 0 and silently fall back to 256 MB.
-    vi.stubEnv("PASEO_CLAUDE_REPLAY_BUDGET_MB", "0.5");
-    const bulkEntry = JSON.stringify({
-      type: "user",
-      isSidechain: true,
-      agentId: AGENT_ID,
-      sessionId: "replay-session",
-      timestamp: "2026-07-26T06:27:55.000Z",
-      message: { role: "user", content: "x".repeat(600 * 1024) },
-    });
-    writeSession({
-      parentLines: [taskToolUse(), taskToolResult()],
-      meta: JSON.stringify({ toolUseId: TOOL_USE_ID }),
-      sidechainLines: [sidechainEntry(), bulkEntry],
-    });
-
-    const events = await replayEvents();
-
-    expect(events.filter((event) => event.type === "provider_subagent")).toEqual([]);
-  });
-
-  test("replays the parent unchanged, matching the same session without subagent transcripts", async () => {
-    // The #5820 reporter's own technique: moving the subagent transcripts away leaves the parent
-    // loading fine. The over-budget skip has to be indistinguishable from that state.
-    vi.stubEnv("PASEO_CLAUDE_REPLAY_BUDGET_MB", "1");
-    const bulkEntry = JSON.stringify({
-      type: "user",
-      isSidechain: true,
-      agentId: AGENT_ID,
-      sessionId: "replay-session",
-      timestamp: "2026-07-26T06:27:55.000Z",
-      message: { role: "user", content: "x".repeat(1024 * 1024 + 8192) },
-    });
-    writeSession({
-      parentLines: [taskToolUse(), taskToolResult()],
-      meta: JSON.stringify({ toolUseId: TOOL_USE_ID }),
-      sidechainLines: [sidechainEntry(), bulkEntry],
-    });
-    const withSidechainsSkipped = await replayEvents();
-
-    rmSync(path.join(claudeProjectDirSync(cwd, { configDir }), "replay-session"), {
-      recursive: true,
-      force: true,
-    });
-    const withoutSidechains = await replayEvents();
-
-    expect(withSidechainsSkipped).toEqual(withoutSidechains);
-  });
-
-  test("does not warn about skipped subagent history when the session has none", async () => {
-    vi.stubEnv("PASEO_CLAUDE_REPLAY_BUDGET_MB", "1");
-    const records: unknown[] = [];
+  test("replays UTF-8 across read chunks, corrupt rows, CRLF and an unterminated final row", async () => {
+    const text = "é🙂".repeat(30_000);
     const historyDir = claudeProjectDirSync(cwd, { configDir });
     mkdirSync(historyDir, { recursive: true });
     writeFileSync(
       path.join(historyDir, "replay-session.jsonl"),
-      [
-        taskToolUse(),
-        taskToolResult(),
-        parentEntry([{ type: "text", text: "x".repeat(1024 * 1024 + 8192) }]),
-      ].join("\n"),
+      parentEntry([{ type: "text", text }]) +
+        "\r\nnot json\r\n" +
+        parentEntry([{ type: "text", text: "final row" }]),
     );
-
-    const client = new ClaudeAgentClient({
-      logger: pino({ level: "info" }, { write: (line: string) => records.push(JSON.parse(line)) }),
-      queryFactory,
-      resolveVersion: async () => "2.1.220",
-    });
-    const session = await client.resumeSession(
-      { provider: "claude", sessionId: "replay-session" },
-      { cwd },
-    );
-    const events: AgentStreamEvent[] = [];
-    for await (const event of session.streamHistory()) {
-      events.push(event);
-    }
-    await session.close();
-
-    expect(
-      records.filter(
-        (record) =>
-          (record as { msg?: string }).msg ===
-          "Skipped Claude subagent history replay for oversized transcript",
-      ),
-    ).toEqual([]);
-    expect(events.filter((event) => event.type === "timeline").length).toBeGreaterThan(0);
+    const events = await replayEvents();
+    expect(events.filter((event) => event.type === "timeline").map((event) => event.item)).toEqual([
+      { type: "assistant_message", text },
+      { type: "assistant_message", text: "final row" },
+    ]);
   });
 
-  test("warns with the byte accounting when subagent history is skipped", async () => {
-    vi.stubEnv("PASEO_CLAUDE_REPLAY_BUDGET_MB", "1");
-    const records: unknown[] = [];
-    const bulkEntry = JSON.stringify({
-      type: "user",
-      isSidechain: true,
-      agentId: AGENT_ID,
-      sessionId: "replay-session",
-      timestamp: "2026-07-26T06:27:55.000Z",
-      message: { role: "user", content: "x".repeat(1024 * 1024 + 8192) },
-    });
-    writeSession({
-      parentLines: [taskToolUse(), taskToolResult()],
-      meta: JSON.stringify({ toolUseId: TOOL_USE_ID }),
-      sidechainLines: [sidechainEntry(), bulkEntry],
-    });
-
-    const client = new ClaudeAgentClient({
-      logger: pino({ level: "info" }, { write: (line: string) => records.push(JSON.parse(line)) }),
-      queryFactory,
-      resolveVersion: async () => "2.1.220",
-    });
-    const session = await client.resumeSession(
-      { provider: "claude", sessionId: "replay-session" },
-      { cwd },
-    );
-    for await (const _event of session.streamHistory()) {
-      // Drain the replay so the skip decision has run.
-    }
-    await session.close();
-
-    expect(records).toContainEqual(
-      expect.objectContaining({
-        level: pino.levels.values.warn,
-        msg: "Skipped Claude subagent history replay for oversized transcript",
-        sessionId: "replay-session",
-        parentBytes: expect.any(Number),
-        sidechainBytes: expect.any(Number),
-        budgetBytes: 1024 * 1024,
-      }),
-    );
-    const warned = records.find(
-      (record) =>
-        (record as { msg?: string }).msg ===
-        "Skipped Claude subagent history replay for oversized transcript",
-    ) as { parentBytes: number; sidechainBytes: number };
-    expect(warned.parentBytes).toBeGreaterThan(0);
-    expect(warned.sidechainBytes).toBeGreaterThan(1024 * 1024);
-  });
-
-  test("skips workflow replay too when the transcript exceeds the replay budget", async () => {
-    vi.stubEnv("PASEO_CLAUDE_REPLAY_BUDGET_MB", "1");
-    const bulkEntry = JSON.stringify({
-      type: "user",
-      isSidechain: true,
-      agentId: "wf-bulk-agent",
-      sessionId: "replay-session",
-      timestamp: "2026-07-26T06:27:55.000Z",
-      message: { role: "user", content: "x".repeat(1024 * 1024 + 8192) },
-    });
-    writeWorkflowSession("completed", {
-      children: [
-        {
-          agentId: "wf-bulk-agent",
-          output: "child output",
-          timestamp: "2026-07-26T06:29:00.000Z",
-        },
-      ],
-    });
-    const subagentDirectory = path.join(
+  test("converts workflow tools in timestamp order before correlating their results", async () => {
+    writeWorkflowSession("completed");
+    const directory = path.join(
       claudeProjectDirSync(cwd, { configDir }),
       "replay-session",
       "subagents",
+      "workflows",
+      WORKFLOW_RUN_ID,
     );
     writeSubagent({
-      subagentDir: subagentDirectory,
-      agentId: "wf-bulk-agent",
-      sidechainLines: [bulkEntry],
+      subagentDir: directory,
+      agentId: "a-result",
+      sidechainLines: [
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-07-26T06:28:01.000Z",
+          message: {
+            content: [{ type: "tool_result", tool_use_id: "workflow-bash", content: "finished" }],
+          },
+        }),
+      ],
     });
-
-    const events = await replayEvents();
-
-    expect(events.filter((event) => event.type === "provider_subagent")).toEqual([]);
-    const notifications = events.filter(
-      (event) =>
-        event.type === "timeline" &&
-        event.item.type === "tool_call" &&
-        event.item.name === "task_notification",
-    );
-    expect(notifications.length).toBeGreaterThanOrEqual(1);
+    writeSubagent({
+      subagentDir: directory,
+      agentId: "z-call",
+      sidechainLines: [
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-07-26T06:28:00.000Z",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "workflow-bash",
+                name: "Bash",
+                input: { command: "echo finished" },
+              },
+            ],
+          },
+        }),
+      ],
+    });
+    const events = await replayDescriptors();
+    const calls = events
+      .map((event) => event.event)
+      .filter((event) => event.type === "timeline" && event.item.type === "tool_call");
+    expect(calls).toEqual([
+      expect.objectContaining({
+        id: WORKFLOW_TOOL_USE_ID,
+        item: expect.objectContaining({ callId: "workflow-bash", name: "Bash", status: "running" }),
+      }),
+      expect.objectContaining({
+        id: WORKFLOW_TOOL_USE_ID,
+        item: expect.objectContaining({
+          callId: "workflow-bash",
+          name: "Bash",
+          status: "completed",
+          detail: expect.objectContaining({ type: "shell", output: "finished" }),
+        }),
+      }),
+    ]);
   });
 
   test("does not accumulate internal workflow agents as replay-only running rows", async () => {
