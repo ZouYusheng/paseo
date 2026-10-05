@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import pino from "pino";
@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { ClaudeAgentClient } from "./agent.js";
 import { claudeProjectDirSync } from "./project-dir.js";
+import { readClaudeReplayHistory } from "./transcript-history.js";
 
 /**
  * A resumed Claude agent whose transcript is missing or unreadable opens with an empty timeline.
@@ -89,5 +90,15 @@ describe("ClaudeAgentSession persisted history load", () => {
         err: expect.objectContaining({ message: expect.stringContaining("EISDIR") }),
       }),
     );
+  });
+
+  test("propagates read errors when a transcript disappears before replay", () => {
+    const file = transcriptPath();
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "");
+    const history = readClaudeReplayHistory(file);
+    rmSync(file);
+
+    expect(() => [...history.parentEntries]).toThrow("ENOENT");
   });
 });

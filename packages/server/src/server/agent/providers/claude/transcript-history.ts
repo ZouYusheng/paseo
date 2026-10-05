@@ -26,14 +26,18 @@ interface RecordLocation {
 function* locatedRecords(
   file: string,
 ): Generator<{ entry: TranscriptEntry; location: RecordLocation }> {
-  let fd: number;
+  const fd = fs.openSync(file, "r");
   try {
-    fd = fs.openSync(file, "r");
-  } catch {
-    return;
-  }
-  try {
-    let remaining = fs.fstatSync(fd).size;
+    const stat = fs.fstatSync(fd);
+    // Opening a directory succeeds on some platforms; it must never look like empty history.
+    if (stat.isDirectory()) {
+      throw Object.assign(new Error(`EISDIR: illegal operation on a directory, read '${file}'`), {
+        code: "EISDIR",
+        syscall: "read",
+        path: file,
+      });
+    }
+    let remaining = stat.size;
     let offset = 0;
     let pieces: Buffer[] = [];
     let length = 0;
@@ -110,17 +114,12 @@ function workflowRecords(files: readonly string[]): Iterable<TranscriptEntry> {
       let fd: number | null = null;
       try {
         for (const location of locations) {
-          if (currentFile !== location.file) {
+          if (fd === null || currentFile !== location.file) {
             if (fd !== null) fs.closeSync(fd);
             fd = null;
             currentFile = location.file;
-            try {
-              fd = fs.openSync(currentFile, "r");
-            } catch {
-              continue;
-            }
+            fd = fs.openSync(currentFile, "r");
           }
-          if (fd === null) continue;
           const buffer = Buffer.allocUnsafe(location.length);
           let read = 0;
           while (read < buffer.length) {
